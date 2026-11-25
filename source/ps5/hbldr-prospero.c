@@ -51,46 +51,6 @@ along with this program; see the file COPYING. If not, see
   { x ? x : 0, x ? strlen(x) + 1 : 0 }
 #define IOVEC_SIZE(x) (sizeof(x) / sizeof(struct iovec))
 
-static int
-ps5_follow_exec(pid_t pid) {
-  return ptrace(PT_LWP_EVENTS, pid, NULL, 1);
-}
-
-static int
-ps5_await_exec(pid_t pid) {
-  struct ptrace_lwpinfo lwpinfo = { 0 };
-  int status;
-
-  while(!(lwpinfo.pl_flags & PL_FLAG_EXEC)) {
-    if(waitpid(pid, &status, 0) < 0) {
-      return -1;
-    }
-    if(!WIFSTOPPED(status)
-       || ptrace(PT_LWPINFO, pid, (caddr_t)&lwpinfo, sizeof(lwpinfo)) < 0) {
-      return -1;
-    }
-  }
-  return 0;
-}
-
-static intptr_t
-ps5_get_remote_argv(pid_t pid) {
-  intptr_t address = pt_resolve(pid, "FJmglmTMdr4");
-  const uint64_t args[6] = { 0 };
-  intptr_t result = 0;
-
-  if(!address || pt_call(pid, address, args, &result)) {
-    return 0;
-  }
-  return result;
-}
-
-static void
-ps5_log_remote_error(pid_t pid, const char *operation) {
-  int error = pt_errno(pid);
-  fprintf(stderr, "%s: %s\n", operation, strerror(error));
-}
-
 static const char param_json[]
     = "{\n"
       "  \"applicationCategoryType\": 0,\n"
@@ -297,7 +257,7 @@ bigapp_launch(char **argv) {
     return -1;
   }
 
-  if(ps5_follow_exec(child) < 0) {
+  if(pt_follow_exec(child) < 0) {
     LOG_PERROR("pt_follow_exec");
     pt_detach(child, SIGKILL);
     return -1;
@@ -309,7 +269,7 @@ bigapp_launch(char **argv) {
     return -1;
   }
 
-  if(ps5_await_exec(child)) {
+  if(pt_await_exec(child)) {
     LOG_PERROR("pt_await_exec");
     pt_detach(child, SIGKILL);
     return -1;
@@ -320,13 +280,13 @@ bigapp_launch(char **argv) {
 
 static int
 bigapp_set_argv0(pid_t pid, const char *argv0) {
-  intptr_t pos = ps5_get_remote_argv(pid);
+  intptr_t pos = pt_getargv(pid);
   intptr_t buf = 0;
 
   if((buf = pt_mmap(pid, 0, PAGE_SIZE, PROT_WRITE | PROT_READ,
                     MAP_ANONYMOUS | MAP_PRIVATE, -1, 0))
      == -1) {
-    ps5_log_remote_error(pid, "pt_mmap");
+    pt_perror(pid, "pt_mmap");
     return -1;
   }
 

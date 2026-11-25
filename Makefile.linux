@@ -1,0 +1,49 @@
+#   Copyright (C) 2024 John Törnblom
+#
+# This file is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; see the file COPYING. If not see
+# <http://www.gnu.org/licenses/>.
+
+VERSION_TAG := $(shell git describe --abbrev=10 --dirty --always --tags)
+
+PYTHON ?= python3
+
+BIN   := build/linux/websrv-linux.elf
+SRCS   := $(addprefix source/common/,main.c websrv.c asset.c fs.c mime.c mdns.c)
+SRCS   += $(addprefix source/common/,sys.c hbldr.c)
+SRCS   += source/linux/sys-linux.c
+
+CFLAGS := -Wall -Iheaders -DVERSION_TAG=\"$(VERSION_TAG)\"
+LDADD  += `pkg-config libmicrohttpd --libs`
+LDADD  += `pkg-config microdns --libs`
+
+
+
+ASSETS   := $(filter-out assets/pkg,$(wildcard assets/*))
+GEN_DIR  := build/linux/gen
+GEN_SRCS := $(patsubst assets/%,$(GEN_DIR)/%, $(ASSETS:=.c))
+
+all: $(BIN)
+
+$(GEN_DIR) build/linux:
+	mkdir -p $@
+
+clean:
+	rm -rf build
+
+$(GEN_DIR)/%.c: assets/% | $(GEN_DIR)
+	$(PYTHON) scripts/gen-asset-module.py --path $* $< > $@
+
+$(BIN): $(SRCS) $(GEN_SRCS) | build/linux
+	$(CC) $(CFLAGS) -o $@ $^ $(LDADD)
+

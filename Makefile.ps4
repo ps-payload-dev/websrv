@@ -1,0 +1,107 @@
+PLATFORM := ps4
+PYTHON3 ?= python3
+PS4_HOST ?= ps4
+PS4_PORT ?= 9021
+
+ifndef PS4_PAYLOAD_SDK
+$(error PS4_PAYLOAD_SDK is undefined)
+endif
+include $(PS4_PAYLOAD_SDK)/toolchain/orbis.mk
+
+BIN := build/ps4/websrv-ps4.elf
+DEPLOY := $(PS4_DEPLOY)
+HOST := $(PS4_HOST)
+PORT := $(PS4_PORT)
+
+# The PS4 app installer needs a signed eboot and a binary param.sfo, unlike the
+# plain param.json of the PS5. Build them with the helpers of the install_app
+# sample from the PS4 payload SDK and embed them in websrv. The eboot itself is
+# assets/pkg/eboot-ps4.c.
+LAUNCHER_DIR := build/ps4/launcher
+INSTALL_APP_DIR := $(PS4_PAYLOAD_SDK)/samples/install_app
+PS4_SDK_VERSION ?= 0x03500000
+AUTHID := 0x3800000000000011
+AUTHINFO := 00 00 00 00 00 00 00 00 00 00 00 00 00 1C 00 40 00 FF 00 00 00 00 \
+            00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 \
+            00 40 00 40 00 00 00 00 00 00 00 80 00 00 00 00 00 00 00 08 00 40 \
+            FF FF 00 00 00 F0 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 \
+            00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 \
+            00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 \
+            00 00 00 00
+
+TITLE_ID := FAKE00000
+
+EXTRA_DEPS := $(LAUNCHER_DIR)/eboot.bin $(LAUNCHER_DIR)/open.elf $(LAUNCHER_DIR)/param.sfo
+EXTRA_CFLAGS := -DLAUNCHER_EBOOT=\"$(LAUNCHER_DIR)/eboot.bin\"
+EXTRA_CFLAGS += -DLAUNCHER_OPENER=\"$(LAUNCHER_DIR)/open.elf\"
+EXTRA_CFLAGS += -DLAUNCHER_PARAM=\"$(LAUNCHER_DIR)/param.sfo\"
+EXTRA_CFLAGS += -DLAUNCHER_ICON0=\"assets/pkg/icon0.png\"
+
+SYS_SRC := source/ps4/sys-orbis.c
+PLATFORM_SRCS := $(SYS_SRC)
+
+include Makefile.build
+
+BOOT_ELF := $(BIN)
+
+# BIN bootstrapper: a flat x86-64 image that maps $(BOOT_ELF) into memory,
+# applies its relative relocations and jumps to its entry point
+BOOT_BIN := $(BOOT_ELF:.elf=.bin)
+BOOT_DIR := $(BUILD_DIR)/bootstrap
+
+all: $(BOOT_BIN)
+
+$(BOOT_DIR)/bin.o: source/ps4/bootstrap-bin.c $(BOOT_ELF)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -fPIC -fno-stack-protector -fno-builtin -Wall -Werror 	    -DBOOT_ELF=\"$(BOOT_ELF)\" -c -o $@ $<
+
+$(BOOT_DIR)/bin.elf: $(BOOT_DIR)/bin.o source/ps4/bin_x86_64.x
+	$(LD) -T source/ps4/bin_x86_64.x -o $@ $<
+
+$(BOOT_BIN): $(BOOT_DIR)/bin.elf
+	$(OBJCOPY) -O binary --only-section=.text $< $@
+
+.INTERMEDIATE: $(LAUNCHER_DIR)/eboot.elf
+
+# opens the websrv page, sent to the ELF loader by the eboot
+$(LAUNCHER_DIR)/open.elf: assets/pkg/open-ps4.c
+	@mkdir -p $(dir $@)
+	$(CC) -g -Wall -Werror -Iheaders -o $@ $< -lkernel -lSceSystemService -lSceUserService
+
+# the eboot has no libc, it sends open.elf to the ELF loader
+$(LAUNCHER_DIR)/eboot.o: assets/pkg/eboot-ps4.c
+	@mkdir -p $(dir $@)
+	$(CC) -DTITLE_ID=\"$(TITLE_ID)\" -c -o $@ $<
+
+$(LAUNCHER_DIR)/eboot.elf: $(LAUNCHER_DIR)/eboot.o
+	$(LD) --static -T $(INSTALL_APP_DIR)/eboot.x -o $@ $<
+
+$(LAUNCHER_DIR)/eboot.bin: $(LAUNCHER_DIR)/eboot.elf
+	$(INSTALL_APP_DIR)/make_fself.py --ptype fake --paid $(AUTHID) \
+	    --auth-info "$(AUTHINFO)" \
+	    --app-version $(PS4_SDK_VERSION) \
+	    --fw-version $(PS4_SDK_VERSION) $< $@
+
+$(LAUNCHER_DIR)/param.sfo: assets/pkg/param.json
+	@mkdir -p $(dir $@)
+	$(INSTALL_APP_DIR)/json2sfo.py $< $@
+	$(PYTHON3) -c "import sys; d=open(sys.argv[1],'rb').read(); assert d.count(b'gd\x00\x00')==1; open(sys.argv[1],'wb').write(d.replace(b'gd\x00\x00',b'gde\x00'))" $@
+
+# websrv carries a copy of itself for the eboot of the app, which starts websrv
+# when it is not serving. The copy is the same server without the copy, so the
+# app does not get a larger one every time it is replaced.
+CORE := $(BUILD_DIR)/websrv-core.elf
+CORE_SYS := $(BUILD_DIR)/core/$(SYS_SRC:.c=.o)
+CORE_OBJECTS := $(filter-out $(BUILD_DIR)/$(SYS_SRC:.c=.o),$(OBJECTS)) $(CORE_SYS)
+
+$(CORE_SYS): $(SYS_SRC) $(EXTRA_DEPS) | $(ELFLDR) $(PTRACE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(CORE): $(CORE_OBJECTS) $(ELFLDR) $(PTRACE)
+	@mkdir -p $(dir $@)
+	$(CC) -o $@ $(CORE_OBJECTS) $(ELFLDR) $(PTRACE) $(LDADD)
+
+$(BUILD_DIR)/$(SYS_SRC:.c=.o): $(SYS_SRC) $(CORE) $(EXTRA_DEPS) | $(ELFLDR) $(PTRACE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DLAUNCHER_SELF=\"$(CORE)\" -c -o $@ $<

@@ -1,0 +1,91 @@
+VERSION_TAG := $(shell git describe --abbrev=10 --dirty --always --tags)
+PYTHON ?= python3
+
+BUILD_DIR := build/$(PLATFORM)
+
+# dependencies, cloned on demand (the headers live under headers/)
+PTRACE_REPO ?= https://github.com/ps-payload-dev/lib-ptrace.git
+ELFLDR_REPO ?= https://github.com/ps-payload-dev/elfldr.git
+DEPS_DIR ?= deps
+PTRACE_DIR ?= $(DEPS_DIR)/lib-ptrace
+ELFLDR_DIR ?= $(DEPS_DIR)/elfldr
+PTRACE := $(PTRACE_DIR)/build/$(PLATFORM)/libptrace.a
+ELFLDR := $(ELFLDR_DIR)/build/$(PLATFORM)/lib-elfldr.a
+PTRACE_HEADERS := headers
+ELFLDR_HEADERS := headers
+
+SRCS := $(addprefix source/common/,main.c websrv.c asset.c fs.c mime.c mdns.c)
+SRCS += $(addprefix source/common/,smb.c notify.c http.c sys.c hbldr.c)
+SRCS += $(PLATFORM_SRCS)
+
+CFLAGS := -g -O0 -fno-omit-frame-pointer -Wall -Werror -Iheaders
+CFLAGS += -I$(ELFLDR_DIR)/$(ELFLDR_HEADERS) -I$(PTRACE_DIR)/$(PTRACE_HEADERS)
+CFLAGS += -DVERSION_TAG=\"$(VERSION_TAG)\"
+CFLAGS += `$(PKG_CONFIG) libmicrohttpd microdns libsmb2 --cflags`
+CFLAGS += $(EXTRA_CFLAGS)
+
+LDADD := -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil
+LDADD += -lSceSsl -lSceHttp
+LDADD += `$(PKG_CONFIG) libmicrohttpd --libs`
+LDADD += `$(PKG_CONFIG) microdns --libs`
+LDADD += `$(PKG_CONFIG) libsmb2 --libs`
+
+ASSETS := $(filter-out assets/pkg,$(wildcard assets/*))
+GEN_DIR := $(BUILD_DIR)/gen
+GEN_SRCS := $(patsubst assets/%,$(GEN_DIR)/%, $(ASSETS:=.c))
+GEN_OBJECTS := $(GEN_SRCS:.c=.o)
+OBJECTS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS)) $(GEN_OBJECTS)
+
+.PHONY: all clean test homebrew homebrew-test generated-assets format
+
+all: $(BIN)
+
+generated-assets: $(GEN_SRCS)
+
+$(GEN_DIR):
+	mkdir -p $@
+
+$(GEN_DIR)/%.c: assets/% | $(GEN_DIR)
+	$(PYTHON) scripts/gen-asset-module.py --path $* $< > $@
+
+$(GEN_OBJECTS): %.o: %.c | $(ELFLDR) $(PTRACE)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# the dependencies must be there before anything is compiled
+$(PTRACE_DIR)/Makefile:
+	git clone --depth 1 $(PTRACE_REPO) $(PTRACE_DIR)
+
+$(ELFLDR_DIR)/Makefile:
+	git clone --depth 1 $(ELFLDR_REPO) $(ELFLDR_DIR)
+
+$(PTRACE): $(PTRACE_DIR)/Makefile
+	$(MAKE) -C $(PTRACE_DIR) PLATFORM=$(PLATFORM) all
+
+$(ELFLDR): $(ELFLDR_DIR)/Makefile $(PTRACE)
+	$(MAKE) -C $(ELFLDR_DIR) PLATFORM=$(PLATFORM) PTRACE_DIR=$(abspath $(PTRACE_DIR)) all
+
+$(BUILD_DIR)/%.o: %.c | $(ELFLDR) $(PTRACE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR)/$(SYS_SRC:.c=.o): $(EXTRA_DEPS)
+
+$(BIN): $(OBJECTS) $(ELFLDR) $(PTRACE) $(EXTRA_DEPS)
+	@mkdir -p $(dir $@)
+	$(CC) -o $@ $(OBJECTS) $(ELFLDR) $(PTRACE) $(LDADD)
+
+
+homebrew:
+	$(MAKE) -f homebrew/shared/Makefile PLATFORM=$(PLATFORM) all
+
+homebrew-test:
+	$(MAKE) -f homebrew/shared/Makefile PLATFORM=$(PLATFORM) test
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+test: $(BIN)
+	$(DEPLOY) -h $(HOST) -p $(PORT) $<
+
+format:
+	clang-format -i $(wildcard source/*/*.c assets/pkg/*.c headers/*.h)

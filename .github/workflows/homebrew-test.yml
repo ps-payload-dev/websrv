@@ -1,0 +1,53 @@
+name: Homebrew test
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "homebrew/**"
+      - ".github/workflows/homebrew-test.yml"
+  pull_request:
+    paths:
+      - "homebrew/**"
+      - ".github/workflows/homebrew-test.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ps4, ps5]
+    steps:
+      - name: Checkout SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ps-payload-dev/sdk
+          path: sdk
+
+      - name: Set up both SDKs
+        working-directory: sdk
+        run: |
+          sudo apt update
+          sudo apt install clang-18 lld-18
+          make DESTDIR=${{ runner.tool_cache }}/ps-payload-sdk clean install
+          echo PS4_PAYLOAD_SDK=${{ runner.tool_cache }}/ps-payload-sdk/ps4 >> $GITHUB_ENV
+          echo PS5_PAYLOAD_SDK=${{ runner.tool_cache }}/ps-payload-sdk/ps5 >> $GITHUB_ENV
+
+      - name: Checkout websrv
+        uses: actions/checkout@v4
+
+      - name: Build the SDK-only samples
+        run: make -f homebrew/shared/Makefile PLATFORM=${{ matrix.platform }} test
+
+      - name: Upload samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-${{ matrix.platform }}
+          path: build/${{ matrix.platform }}/homebrew
+          if-no-files-found: error

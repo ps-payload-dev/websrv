@@ -1,0 +1,18 @@
+PLATFORM := ps5
+PS5_HOST ?= ps5
+PS5_PORT ?= 9021
+
+ifndef PS5_PAYLOAD_SDK
+$(error PS5_PAYLOAD_SDK is undefined)
+endif
+include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+
+BIN := build/ps5/websrv-ps5.elf
+DEPLOY := $(PS5_DEPLOY)
+HOST := $(PS5_HOST)
+PORT := $(PS5_PORT)
+
+SYS_SRC := source/ps5/sys-prospero.c
+PLATFORM_SRCS := $(SYS_SRC) source/ps5/hbldr-prospero.c
+
+include Makefile.build
